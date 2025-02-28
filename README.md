@@ -1,6 +1,6 @@
 # Opal Unmixing
 
-Script for working with QPTIFF files and Opal unmixing.
+Script for working with QPTIFF files and Opal unmixing Sample AF from the other channels.
 
 This will generate big image files! About 2-8Gb for non pyramidal images and 10-40Gb for pyramidal images.
 
