@@ -38,7 +38,7 @@ Install miniconda, openjdk, and maven. Then create a new environment with python
 
 ### Clone the Repository
     ```bash
-    git clone https://github.com/yourusername/Opal_unmixing.git
+    git clone https://github.com/alex1075/Opal-unmixing.git
     cd Opal_unmixing
     ```
 
