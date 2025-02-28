@@ -2,6 +2,8 @@
 
 Script for working with QPTIFF files and Opal unmixing.
 
+This will generate big image files! About 2-8Gb for non pyramidal images and 10-40Gb for pyramidal images.
+
 ## Installation
 
 ### Prerequisites
