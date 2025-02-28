@@ -1,0 +1,4 @@
+scyjava
+numpy
+tifffile
+scikit-image
