@@ -71,3 +71,7 @@ To run the script for unmixing channels in a QPTIFF file and generate a pyramida
     python unmix_convert.py <input_file> <output_file> 
 
 ```
+
+## To Do
+- [ ] Calculate unmixing matrix for all Opal dyes to unmix all channels
+- [ ] Add support for other export file formats
