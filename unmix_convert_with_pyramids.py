@@ -58,7 +58,7 @@ def extract_channel_names_from_qptiff(file_path):
         # Close the reader
         reader.close()
 
-def unmix_channels(file_path, output_path, unmix_coeff=0.3):
+def unmix_channels(file_path, output_path, unmix_coeff=0.3, unmixing_matrix=None):
     # Create a reader and configure with OMEXML metadata
     reader = ImageReader()
     service = OMEXMLServiceImpl()
@@ -111,7 +111,12 @@ def unmix_channels(file_path, output_path, unmix_coeff=0.3):
             if i != af_channel_index:
                 channel_data = reader.openBytes(i)
                 channel_data = np.frombuffer(channel_data, dtype=np.uint8).reshape((size_y, size_x))
-                unmixed_data[unmixed_channel_index] = np.maximum(0, channel_data - (af_channel_data * unmix_coeff))
+                if unmixing_matrix is not None:
+                    # Apply unmixing matrix if provided
+                    unmixed_data[unmixed_channel_index] = np.dot(unmixing_matrix[unmixed_channel_index], channel_data.flatten()).reshape((size_y, size_x))
+                else:
+                    # Default unmixing by subtracting AF channel
+                    unmixed_data[unmixed_channel_index] = np.maximum(0, channel_data - (af_channel_data * unmix_coeff))
                 unmixed_channel_names.append(meta_retrieve.getChannelName(0, i))
                 unmixed_channel_index += 1
         
@@ -140,8 +145,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Unmix channels in a QPTIFF file and save to OME-TIFF with image pyramid.")
     parser.add_argument("input", help="Path to the input QPTIFF file")
     parser.add_argument("output", help="Path to the output OME-TIFF file")
+    parser.add_argument("--unmixing_matrix", help="Path to the unmixing matrix .npy file", default=None)
     args = parser.parse_args()
 
+    # Load unmixing matrix if provided
+    unmixing_matrix = None
+    if args.unmixing_matrix:
+        unmixing_matrix = np.load(args.unmixing_matrix)
+
     # Perform unmixing and save to OME-TIFF
-    unmix_channels(args.input, args.output)
+    unmix_channels(args.input, args.output, unmixing_matrix=unmixing_matrix)
 
