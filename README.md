@@ -61,14 +61,14 @@ Install miniconda, openjdk, and maven. Then create a new environment with python
 To run the script for unmixing channels in a QPTIFF file ONLY, use the following command:
 
 ```bash
-    python unmix_convert.py <input_file> <output_file> 
+    python unmix_convert.py <input_file> <output_file> <unmixing_matrix:optional>
 
 ```
 
 To run the script for unmixing channels in a QPTIFF file and generate a pyramidal image, use the following command:    
 
 ```bash
-    python unmix_convert.py <input_file> <output_file> 
+    python unmix_convert.py <input_file> <output_file> <unmixing_matrix:optional>
 
 ```
 
