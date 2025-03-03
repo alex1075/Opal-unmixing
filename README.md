@@ -73,5 +73,5 @@ To run the script for unmixing channels in a QPTIFF file and generate a pyramida
 ```
 
 ## To Do
-- [ ] Calculate unmixing matrix for all Opal dyes to unmix all channels
+- [X] Calculate unmixing matrix for all Opal dyes to unmix all channels (through single stain controls)
 - [ ] Add support for other export file formats
