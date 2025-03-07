@@ -57,7 +57,7 @@ def extract_channel_names_from_qptiff(file_path):
         # Close the reader
         reader.close()
 
-def unmix_channels(file_path, output_path, unmix_coeff=0.3, unmixing_matrix=None):
+def unmix_channels(file_path, output_path, unmix_coeff=0.3, unmixing_matrix_data=None):
     # Create a reader and configure with OMEXML metadata
     reader = ImageReader()
     service = OMEXMLServiceImpl()
@@ -101,23 +101,58 @@ def unmix_channels(file_path, output_path, unmix_coeff=0.3, unmixing_matrix=None
         af_channel_data = np.frombuffer(af_channel_data, dtype=np.uint8).reshape((size_y, size_x))
         
         # Prepare the unmixed data array
-        unmixed_data = np.zeros((channel_count - 1, size_y, size_x), dtype=np.uint8)
+        unmixed_data = np.zeros((channel_count, size_y, size_x), dtype=np.uint8)
         
-        # Apply channel arithmetic to subtract AF from each channel
-        unmixed_channel_index = 0
-        unmixed_channel_names = []
+        # Read all channel data into a single array
+        all_channel_data = np.zeros((channel_count, size_y, size_x), dtype=np.uint8)
         for i in range(channel_count):
-            if i != af_channel_index:
-                channel_data = reader.openBytes(i)
-                channel_data = np.frombuffer(channel_data, dtype=np.uint8).reshape((size_y, size_x))
-                if unmixing_matrix is not None:
-                    # Apply unmixing matrix if provided
-                    unmixed_data[unmixed_channel_index] = np.dot(unmixing_matrix[unmixed_channel_index], channel_data.flatten()).reshape((size_y, size_x))
+            channel_data = reader.openBytes(i)
+            all_channel_data[i] = np.frombuffer(channel_data, dtype=np.uint8).reshape((size_y, size_x))
+        
+        unmixed_channel_names = []
+        
+        # Apply unmixing matrix if provided
+        if unmixing_matrix_data is not None:
+            unmixing_matrix = unmixing_matrix_data['unmixing_matrix']
+            unmixing_channel_names = unmixing_matrix_data['channel_names']
+            
+            # Match channels between the image and the unmixing matrix
+            channel_indices = []
+            for name in unmixing_channel_names:
+                if name in meta_retrieve.getChannelName(0, i):
+                    channel_indices.append(meta_retrieve.getChannelName(0, i).index(name))
                 else:
-                    # Default unmixing by subtracting AF channel
-                    unmixed_data[unmixed_channel_index] = np.maximum(0, channel_data - (af_channel_data * unmix_coeff))
+                    channel_indices.append(-1)
+            
+            # Filter out channels that are not found in the image
+            valid_indices = [i for i in channel_indices if i != -1]
+            unmixing_matrix = unmixing_matrix[:, valid_indices]
+            all_channel_data = all_channel_data[valid_indices]
+            
+            # Flatten the channel data for matrix multiplication
+            flat_channel_data = all_channel_data.reshape(len(valid_indices), -1)
+            unmixed_flat_data = np.dot(unmixing_matrix, flat_channel_data)
+            unmixed_data[:unmixing_matrix.shape[0]] = unmixed_flat_data.reshape(unmixing_matrix.shape[0], size_y, size_x)
+            
+            # Copy any remaining channels that were not unmixed
+            if unmixing_matrix.shape[0] < channel_count:
+                unmixed_data[unmixing_matrix.shape[0]:] = all_channel_data[unmixing_matrix.shape[0]:]
+            
+            # Add channel names for unmixed channels
+            for i in range(unmixing_matrix.shape[0]):
+                unmixed_channel_names.append(unmixing_channel_names[i])
+            
+            # Add channel names for remaining channels
+            for i in range(unmixing_matrix.shape[0], channel_count):
                 unmixed_channel_names.append(meta_retrieve.getChannelName(0, i))
-                unmixed_channel_index += 1
+        else:
+            # Default unmixing by subtracting AF channel
+            unmixed_channel_index = 0
+            for i in range(channel_count):
+                if i != af_channel_index:
+                    unmixed_data[unmixed_channel_index] = np.maximum(0, all_channel_data[i] - (af_channel_data * unmix_coeff))
+                    unmixed_channel_names.append(meta_retrieve.getChannelName(0, i))
+                    unmixed_channel_index += 1
         
         # Save the unmixed data to a new OME-TIFF file using tifffile
         metadata = {
@@ -140,10 +175,10 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # Load unmixing matrix if provided
-    unmixing_matrix = None
+    unmixing_matrix_data = None
     if args.unmixing_matrix:
-        unmixing_matrix = np.load(args.unmixing_matrix)
+        unmixing_matrix_data = np.load(args.unmixing_matrix, allow_pickle=True).item()
 
     # Perform unmixing and save to OME-TIFF
-    unmix_channels(args.input, args.output, unmixing_matrix=unmixing_matrix)
+    unmix_channels(args.input, args.output, unmixing_matrix_data=unmixing_matrix_data)
 

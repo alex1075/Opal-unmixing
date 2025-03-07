@@ -16,7 +16,7 @@ scyjava.start_jvm()
 ImageReader = scyjava.jimport('loci.formats.ImageReader')
 OMEXMLServiceImpl = scyjava.jimport('loci.formats.services.OMEXMLServiceImpl')
 
-def read_single_stain(file_path, unmix_coeff=0.3):
+def read_single_stain(file_path):
     # Create a reader and configure with OMEXML metadata
     reader = ImageReader()
     service = OMEXMLServiceImpl()
@@ -27,87 +27,113 @@ def read_single_stain(file_path, unmix_coeff=0.3):
     reader.setId(file_path)
     
     try:
-        # Get image dimensions
+        # Get image dimensions and pixel type
         size_x = reader.getSizeX()
         size_y = reader.getSizeY()
         channel_count = reader.getSizeC()
+        pixel_type = reader.getPixelType()
+        bytes_per_pixel = reader.getBitsPerPixel() // 8
+        
+        # Determine the numpy data type based on the pixel type
+        if pixel_type == 0:  # UINT8
+            dtype = np.uint8
+        elif pixel_type == 1:  # INT8
+            dtype = np.int8
+        elif pixel_type == 2:  # UINT16
+            dtype = np.uint16
+        elif pixel_type == 3:  # INT16
+            dtype = np.int16
+        elif pixel_type == 4:  # UINT32
+            dtype = np.uint32
+        elif pixel_type == 5:  # INT32
+            dtype = np.int32
+        elif pixel_type == 6:  # FLOAT
+            dtype = np.float32
+        elif pixel_type == 7:  # DOUBLE
+            dtype = np.float64
+        else:
+            raise ValueError(f"Unsupported pixel type: {pixel_type}")
         
         # Extract the metadata as a retrievable object
         meta_retrieve = service.asRetrieve(metadata)
+        
+        # Determine if the file is an IM3 file
+        is_im3 = file_path.lower().endswith('.im3')
         
         # Find the indices of the 'Sample AF' and 'DAPI' channels
         af_channel_index = -1
         dapi_channel_index = -1
         for i in range(channel_count):
             name = meta_retrieve.getChannelName(0, i)
-            if name == 'Sample AF':
+            if name == 'Sample AF' and not is_im3:
                 af_channel_index = i
             elif name == 'DAPI':
                 dapi_channel_index = i
         
-        if af_channel_index == -1:
-            print("Could not find 'Sample AF' channel!")
-            return None
+        if af_channel_index == -1 and not is_im3:
+            print(f"Could not find 'Sample AF' channel in {file_path}. Proceeding without it.")
         
-        # Read the 'Sample AF' channel data
-        af_channel_data = reader.openBytes(af_channel_index)
-        af_channel_data = np.frombuffer(af_channel_data, dtype=np.uint8).reshape((size_y, size_x))
+        # Read the 'Sample AF' channel data if available
+        af_channel_data = None
+        if af_channel_index != -1:
+            af_channel_data = reader.openBytes(af_channel_index)
+            af_channel_data = np.frombuffer(af_channel_data, dtype=dtype).reshape((size_y, size_x))
         
-        # Read and unmix the other channels
+        # Read the other channels
         channel_data = []
+        channel_names = []
         for i in range(channel_count):
             if i != af_channel_index and (i != dapi_channel_index or channel_count == 2):
                 data = reader.openBytes(i)
-                data = np.frombuffer(data, dtype=np.uint8).reshape((size_y, size_x))
-                unmixed_data = np.maximum(0, data - (af_channel_data * unmix_coeff))
-                channel_data.append(unmixed_data)
+                data = np.frombuffer(data, dtype=dtype).reshape((size_y, size_x))
+                channel_data.append(data)
+                channel_names.append(meta_retrieve.getChannelName(0, i))
         
-        return np.array(channel_data)
+        return np.array(channel_data), channel_names
     
     finally:
         # Close the reader
         reader.close()
 
 def generate_unmixing_matrix(single_stain_folder):
-    # Get list of single stain QPTIFF files
-    file_paths = glob(os.path.join(single_stain_folder, "*.qptiff"))
+    # Get list of single stain IM3 and QPTIFF files
+    file_paths = glob(os.path.join(single_stain_folder, "*.im3")) + glob(os.path.join(single_stain_folder, "*.qptiff"))
     
     if not file_paths:
-        print("No QPTIFF files found in the specified folder.")
+        print("No IM3 or QPTIFF files found in the specified folder.")
         return
     
     # Read the single stain images
-    single_stain_images = [read_single_stain(file_path) for file_path in file_paths]
-    
-    # Filter out any None values (in case 'Sample AF' channel was not found)
-    single_stain_images = [img for img in single_stain_images if img is not None]
+    single_stain_images = []
+    channel_names = []
+    for file_path in file_paths:
+        img, names = read_single_stain(file_path)
+        if img is not None:
+            single_stain_images.append(img)
+            channel_names.extend(names)
     
     if not single_stain_images:
         print("No valid single stain images found.")
         return
     
-    # Stack the images to form a 3D array (stains x channels x pixels)
-    single_stain_images = np.stack(single_stain_images, axis=0)
+    # Flatten the images to create a matrix where each row represents a pixel and each column represents a channel
+    single_stain_matrix = np.concatenate([img.reshape(img.shape[0], -1).T for img in single_stain_images], axis=0)
     
-    # Reshape the array to (stains x channels x pixels)
-    stains, channels, height, width = single_stain_images.shape
-    single_stain_images = single_stain_images.reshape(stains, channels, -1)
+    # Compute the unmixing matrix using the pseudoinverse of the single stain matrix
+    unmixing_matrix = np.linalg.pinv(single_stain_matrix)
     
-    # Compute the unmixing matrix
-    unmixing_matrix = np.linalg.pinv(single_stain_images)
-    
-    return unmixing_matrix
+    return unmixing_matrix, channel_names
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Generate an unmixing matrix from single stain QPTIFF files.")
-    parser.add_argument("single_stain_folder", help="Path to the folder containing single stain QPTIFF files")
+    parser = argparse.ArgumentParser(description="Generate an unmixing matrix from single stain IM3 or QPTIFF files.")
+    parser.add_argument("single_stain_folder", help="Path to the folder containing single stain IM3 or QPTIFF files")
     parser.add_argument("output", help="Path to the output file to save the unmixing matrix")
     args = parser.parse_args()
     
     # Generate the unmixing matrix
-    unmixing_matrix = generate_unmixing_matrix(args.single_stain_folder)
+    unmixing_matrix, channel_names = generate_unmixing_matrix(args.single_stain_folder)
     
     if unmixing_matrix is not None:
-        # Save the unmixing matrix to a file
-        np.save(args.output, unmixing_matrix)
-        print(f"Unmixing matrix saved to {args.output}")
+        # Save the unmixing matrix and channel names to a file
+        np.save(args.output, {'unmixing_matrix': unmixing_matrix, 'channel_names': channel_names})
+        print(f"Unmixing matrix and channel names saved to {args.output}")

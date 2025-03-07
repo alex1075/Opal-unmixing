@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project xmlns="http://maven.apache.org/POM/4.0.0"
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://www.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
     <groupId>com.opalunmixing</groupId>
@@ -25,7 +25,7 @@
         <repository>
             <id>ome</id>
             <name>OME Artifactory</name>
-            <url>https://artifacts.openmicroscopy.org/artifactory/maven/</url>
+            <url>https://artifacts.openmicroscopy.org/artifactory/repo</url>
         </repository>
         <!-- SciJava Maven repository -->
         <repository>
@@ -61,7 +61,13 @@
             <artifactId>bio-formats-tools</artifactId>
             <version>${bioformats.version}</version>
         </dependency>
-
+        
+        <!-- OME Zarr Reader -->
+        <dependency>
+            <groupId>ome</groupId>
+            <artifactId>OMEZarrReader</artifactId>
+            <version>0.6.0</version>
+        </dependency>
         <!-- SciJava Common -->
         <dependency>
             <groupId>org.scijava</groupId>

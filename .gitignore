@@ -3,3 +3,5 @@ Polaris/
 target/
 *.tiff
 *.tif
+single_stains/
+*.npy
