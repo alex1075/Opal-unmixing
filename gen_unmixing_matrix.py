@@ -95,7 +95,7 @@ def read_single_stain(file_path):
         # Close the reader
         reader.close()
 
-def generate_unmixing_matrix(single_stain_folder):
+def generate_unmixing_matrix(single_stain_folder, batch_size=10):
     # Get list of single stain IM3 and QPTIFF files
     file_paths = glob(os.path.join(single_stain_folder, "*.im3")) + glob(os.path.join(single_stain_folder, "*.qptiff"))
     
@@ -103,24 +103,42 @@ def generate_unmixing_matrix(single_stain_folder):
         print("No IM3 or QPTIFF files found in the specified folder.")
         return
     
-    # Read the single stain images
+    # Initialize the unmixing matrix
+    unmixing_matrix = None
+    
+    # Read the single stain images in batches
     single_stain_images = []
     channel_names = []
-    for file_path in file_paths:
+    for i, file_path in enumerate(file_paths):
         img, names = read_single_stain(file_path)
         if img is not None:
             single_stain_images.append(img)
             channel_names.extend(names)
-    
-    if not single_stain_images:
-        print("No valid single stain images found.")
-        return
-    
-    # Flatten the images to create a matrix where each row represents a pixel and each column represents a channel
-    single_stain_matrix = np.concatenate([img.reshape(img.shape[0], -1).T for img in single_stain_images], axis=0)
-    
-    # Compute the unmixing matrix using the pseudoinverse of the single stain matrix
-    unmixing_matrix = np.linalg.pinv(single_stain_matrix)
+        
+        # Process the batch
+        if (i + 1) % batch_size == 0 or (i + 1) == len(file_paths):
+            # Flatten the images to create a matrix where each row represents a pixel and each column represents a channel
+            single_stain_matrix = np.concatenate([img.reshape(img.shape[0], -1).T for img in single_stain_images], axis=0)
+            
+            # Use memory mapping to handle large arrays
+            mm = np.memmap('single_stain_matrix.dat', dtype=single_stain_matrix.dtype, mode='w+', shape=single_stain_matrix.shape)
+            mm[:] = single_stain_matrix[:]
+            
+            # Compute the pseudoinverse of the single stain matrix
+            pinv_matrix = np.linalg.pinv(mm)
+            
+            # Initialize or update the unmixing matrix
+            if unmixing_matrix is None:
+                unmixing_matrix = pinv_matrix
+            else:
+                unmixing_matrix += pinv_matrix
+            
+            # Clean up the memory-mapped file
+            del mm
+            os.remove('single_stain_matrix.dat')
+            
+            # Clear the batch
+            single_stain_images = []
     
     return unmixing_matrix, channel_names
 

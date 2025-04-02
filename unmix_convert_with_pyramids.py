@@ -1,158 +1,336 @@
-import scyjava
+#!/usr/bin/env python
+"""
+Line Scan TIFF to OME-TIFF Generator
+
+Specialized script for handling line scan TIFF files from Akoya InForm software.
+These are unusual tiles that are very short in height (6px) but wide.
+
+Requirements:
+- tifffile
+- numpy 
+- matplotlib (for visualization)
+"""
+
+import os
+import sys
+import time
+import glob
+import re
+import argparse
 import numpy as np
 import tifffile
-import os
 import logging
-import argparse
-from skimage.transform import pyramid_gaussian
+from tifffile import TiffWriter
+from pathlib import Path
 
-# Set up Python logging to suppress DEBUG messages
-logging.basicConfig(level=logging.INFO)
+# Setup logging
+logging.basicConfig(level=logging.INFO, 
+                    format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-# Initialize Java with bioformats and set logging level to WARN
-scyjava.config.endpoints.append('ome:formats-gpl:6.7.0')
-scyjava.start_jvm()
+def extract_coordinates(filename):
+    """Extract [x,y] coordinates from filename."""
+    match = re.search(r'\[(\d+),(\d+)\]', filename)
+    if match:
+        return int(match.group(1)), int(match.group(2))
+    return None, None
 
-# Import necessary Java classes
-ImageReader = scyjava.jimport('loci.formats.ImageReader')
-OMEXMLServiceImpl = scyjava.jimport('loci.formats.services.OMEXMLServiceImpl')
-DynamicMetadataOptions = scyjava.jimport('loci.formats.in.DynamicMetadataOptions')
-MetadataTools = scyjava.jimport('loci.formats.MetadataTools')
-
-def extract_channel_names_from_qptiff(file_path):
-    # Create a reader and configure with OMEXML metadata
-    reader = ImageReader()
-    service = OMEXMLServiceImpl()
+def find_tiff_files(folder_path, pattern=None):
+    """Find all TIFF files in the given folder, optionally matching a pattern."""
+    folder_path = Path(folder_path)
+    all_files = []
     
-    # Set metadata store with appropriate options
-    metadata = service.createOMEXMLMetadata()
-    reader.setMetadataStore(metadata)
-    reader.setId(file_path)
+    # Find all TIFF files
+    for ext in ['*.tif', '*.tiff', '*.TIF', '*.TIFF']:
+        all_files.extend(folder_path.glob(ext))
     
+    # Filter by pattern if specified
+    if pattern:
+        pattern_regex = re.compile(pattern.replace('*', '.*'))
+        all_files = [f for f in all_files if pattern_regex.search(f.name)]
+    
+    return all_files
+
+def get_image_dimensions(file_path):
+    """Get dimensions of an image using tifffile."""
+    with tifffile.TiffFile(file_path) as tif:
+        page = tif.pages[0]
+        width = page.imagewidth
+        height = page.imagelength
+        
+        # Try to determine number of channels
+        if page.samplesperpixel > 1:
+            channels = page.samplesperpixel
+        else:
+            # Check if we have extra dimensions in the data
+            img = tif.asarray()
+            if len(img.shape) > 2:
+                channels = img.shape[2]
+            else:
+                channels = 1
+    
+    return width, height, channels
+
+def analyze_files(files):
+    """Analyze all files to determine canvas size and data properties."""
+    coordinates = []
+    dimensions = []
+    max_x = 0
+    max_y = 0
+    max_width = 0
+    max_height = 0
+    
+    for file in files:
+        x, y = extract_coordinates(file.name)
+        if x is None or y is None:
+            logger.warning(f"Could not extract coordinates from {file.name}")
+            continue
+            
+        try:
+            width, height, channels = get_image_dimensions(file)
+            logger.info(f"File {file.name}: pos=({x},{y}), size={width}x{height}, channels={channels}")
+            
+            max_x = max(max_x, x + width)
+            max_y = max(max_y, y + height)
+            max_width = max(max_width, width)
+            max_height = max(max_height, height)
+            
+            coordinates.append((x, y))
+            dimensions.append((width, height, channels))
+        except Exception as e:
+            logger.error(f"Error analyzing {file}: {str(e)}")
+    
+    return coordinates, dimensions, max_x, max_y, max_width, max_height
+
+def read_tiff(file_path):
+    """Read TIFF file, handling specials cases for line scans."""
     try:
-        # Get channel count
-        channel_count = reader.getSizeC()
-        
-        # Extract the metadata as a retrievable object
-        meta_retrieve = service.asRetrieve(metadata)
-        
-        # Get channel names
-        channel_names = []
-        for i in range(channel_count):
-            try:
-                # Series 0 is typically the main image
-                name = meta_retrieve.getChannelName(0, i)
+        with tifffile.TiffFile(file_path) as tif:
+            img = tif.asarray()
+            
+            # Handle special case for Akoya component data
+            if 'component_data' in str(file_path):
+                # Check if this is a tall, thin image that could be reshaped
+                if len(img.shape) == 2 and img.shape[0] % 6 == 0:
+                    width = img.shape[1]
+                    height = 6
+                    channels = img.shape[0] // height
+                    
+                    # Reshape to proper format (H, W, C)
+                    reshaped = np.zeros((height, width, channels), dtype=img.dtype)
+                    for c in range(channels):
+                        reshaped[:, :, c] = img[c*height:(c+1)*height, :]
+                    
+                    logger.info(f"Reshaped image from {img.shape} to {reshaped.shape}")
+                    return reshaped
                 
-                # If name is None or empty, use a default name
-                if name is None or str(name) == "":
-                    name = f"Channel {i+1}"
-                
-                channel_names.append(str(name))
-            except Exception as e:
-                print(f"Error getting name for channel {i}: {e}")
-                channel_names.append(f"Channel {i+1}")
-        
-        return channel_names
-    
-    finally:
-        # Close the reader
-        reader.close()
+                # If we have too many channels, limit to 6 (common for Akoya)
+                if len(img.shape) == 3 and img.shape[2] > 6:
+                    logger.info(f"Limiting channels from {img.shape[2]} to 6")
+                    return img[:, :, :6]
+            
+            return img
+            
+    except Exception as e:
+        logger.error(f"Error reading {file_path}: {str(e)}")
+        return None
 
-def unmix_channels(file_path, output_path, unmix_coeff=0.3, unmixing_matrix=None):
-    # Create a reader and configure with OMEXML metadata
-    reader = ImageReader()
-    service = OMEXMLServiceImpl()
+def create_canvas(max_x, max_y, num_channels, dtype=np.uint16):
+    """Create an empty canvas with buffer space."""
+    # Add a small buffer
+    max_x += 20
+    max_y += 20
     
-    # Set metadata store with appropriate options
-    metadata = service.createOMEXMLMetadata()
-    reader.setMetadataStore(metadata)
-    reader.setId(file_path)
+    logger.info(f"Creating canvas of size {max_y}x{max_x} with {num_channels} channels")
+    return np.zeros((max_y, max_x, num_channels), dtype=dtype)
+
+def place_image_on_canvas(canvas, img, x, y):
+    """Place image on canvas at specified coordinates, handling edge cases."""
+    if img is None:
+        return canvas
     
+    # Get image dimensions
+    if len(img.shape) == 2:
+        h, w = img.shape
+        # Convert to 3D for single channel images
+        img_3d = np.zeros((h, w, 1), dtype=img.dtype)
+        img_3d[:, :, 0] = img
+        img = img_3d
+    else:
+        h, w, c = img.shape
+    
+    # Calculate target region
+    end_y = min(y + h, canvas.shape[0])
+    end_x = min(x + w, canvas.shape[1])
+    
+    # Calculate source region
+    src_h = end_y - y
+    src_w = end_x - x
+    
+    # Skip if outside canvas
+    if src_h <= 0 or src_w <= 0 or x >= canvas.shape[1] or y >= canvas.shape[0]:
+        logger.warning(f"Image at ({x},{y}) size {w}x{h} falls outside canvas")
+        return canvas
+    
+    # Copy channels one by one to avoid shape mismatch issues
+    ch_to_copy = min(img.shape[2], canvas.shape[2])
     try:
-        # Get image dimensions
-        size_x = reader.getSizeX()
-        size_y = reader.getSizeY()
-        size_z = reader.getSizeZ()
-        size_t = reader.getSizeT()
-        pixel_type = reader.getPixelType()
-        bytes_per_pixel = reader.getBitsPerPixel() // 8
+        for c in range(ch_to_copy):
+            canvas[y:end_y, x:end_x, c] = img[:src_h, :src_w, c]
+    except Exception as e:
+        logger.error(f"Error copying image: {e}")
+        logger.error(f"Canvas region: {canvas[y:end_y, x:end_x].shape}, Source: {img[:src_h, :src_w].shape}")
+    
+    return canvas
+
+def write_ome_tiff(output_path, img, channel_names, compression='zlib', tile_size=512):
+    """Write pyramidal OME-TIFF with metadata."""
+    # Generate pyramid levels
+    pyramid = [img]
+    current = img
+    
+    while current.shape[0] > 256 and current.shape[1] > 256:
+        # Calculate new dimensions - handle odd sizes properly
+        h, w = current.shape[0], current.shape[1]
+        new_h, new_w = h // 2, w // 2
         
-        # Get channel count
-        channel_count = reader.getSizeC()
+        # Create properly sized array for downsampled image
+        if len(current.shape) == 3:
+            c = current.shape[2]
+            downsampled = np.zeros((new_h, new_w, c), dtype=current.dtype)
+            
+            # Downsample each channel individually with explicit indexing
+            for i in range(c):
+                # Manual downsampling with proper indexing - avoid broadcasting errors
+                for y in range(new_h):
+                    for x in range(new_w):
+                        downsampled[y, x, i] = current[y*2, x*2, i]
+        else:
+            downsampled = np.zeros((new_h, new_w), dtype=current.dtype)
+            # Manual downsampling with proper indexing
+            for y in range(new_h):
+                for x in range(new_w):
+                    downsampled[y, x] = current[y*2, x*2]
         
-        # Extract the metadata as a retrievable object
-        meta_retrieve = service.asRetrieve(metadata)
+        pyramid.append(downsampled)
+        current = downsampled
+    
+    # Generate OME-XML metadata with enhanced channel information
+    ome_xml = '<?xml version="1.0" encoding="UTF-8"?>'
+    ome_xml += '<OME xmlns="http://www.openmicroscopy.org/Schemas/OME/2016-06" '
+    ome_xml += 'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" '
+    ome_xml += 'xsi:schemaLocation="http://www.openmicroscopy.org/Schemas/OME/2016-06 http://www.openmicroscopy.org/Schemas/OME/2016-06/ome.xsd">'
+    
+    # Add image metadata
+    if len(img.shape) == 3:
+        height, width, channels = img.shape
+    else:
+        height, width = img.shape
+        channels = 1
         
-        # Find the index of the 'Sample AF' channel
-        af_channel_index = -1
-        for i in range(channel_count):
-            name = meta_retrieve.getChannelName(0, i)
-            if name == 'Sample AF':
-                af_channel_index = i
-                break
+    # Set appropriate colors for Akoya Opal dyes and map dye names to wavelengths
+    channel_metadata = {
+        'DAPI': {'color': '0000FF', 'emission': 461, 'excitation': 358, 'fluor': 'DAPI'},
+        'Opal 480': {'color': '00FFFF', 'emission': 523, 'excitation': 494, 'fluor': 'Opal 480'},
+        'Opal 520': {'color': '00FF00', 'emission': 565, 'excitation': 494, 'fluor': 'Opal 520'},
+        'Opal 570': {'color': 'FFFF00', 'emission': 570, 'excitation': 555, 'fluor': 'Opal 570'},
+        'Opal 620': {'color': 'FF0000', 'emission': 620, 'excitation': 588, 'fluor': 'Opal 620'},
+        'Sample AF': {'color': 'FFFFFF', 'emission': 500, 'excitation': 488, 'fluor': 'Autofluorescence'},
+        # Generic channel fallback
+        'default': {'color': 'FFFFFF', 'emission': 500, 'excitation': 488, 'fluor': 'Unknown'}
+    }
+    
+    ome_xml += f'<Image ID="Image:0" Name="Merged Image">'
+    ome_xml += f'<Pixels ID="Pixels:0" DimensionOrder="XYCZT" Type="{img.dtype}" '
+    ome_xml += f'SizeX="{width}" SizeY="{height}" SizeC="{channels}" SizeZ="1" SizeT="1" '
+    ome_xml += f'PhysicalSizeX="1.0" PhysicalSizeY="1.0" PhysicalSizeXUnit="µm" PhysicalSizeYUnit="µm">'
+    
+    # Add channel metadata with more detailed information
+    for i in range(channels):
+        ch_name = channel_names[i] if i < len(channel_names) else f"Channel {i+1}"
         
-        if af_channel_index == -1:
-            print("Could not find 'Sample AF' channel!")
-            return
+        # Get metadata for this channel, defaulting to generic values if not found
+        meta = channel_metadata.get(ch_name, channel_metadata['default'])
         
-        print(f"Found 'Sample AF' at channel index {af_channel_index}")
+        ome_xml += f'<Channel ID="Channel:0:{i}" Name="{ch_name}" '
+        ome_xml += f'SamplesPerPixel="1" Color="{meta["color"]}" '
         
-        # Read the 'Sample AF' channel data
-        af_channel_data = reader.openBytes(af_channel_index)
-        af_channel_data = np.frombuffer(af_channel_data, dtype=np.uint8).reshape((size_y, size_x))
+        # Add fluorophore information
+        if 'fluor' in meta:
+            ome_xml += f'Fluor="{meta["fluor"]}" '
+        if 'emission' in meta:
+            ome_xml += f'EmissionWavelength="{meta["emission"]}" '
+        if 'excitation' in meta:
+            ome_xml += f'ExcitationWavelength="{meta["excitation"]}" '
+            
+        ome_xml += '/>'
+    
+    ome_xml += '</Pixels></Image></OME>'
+    
+    # Write the OME-TIFF
+    with TiffWriter(output_path, bigtiff=True) as tif:
+        options = {
+            'compression': compression,
+            'metadata': {'description': ome_xml},
+            'photometric': 'minisblack',
+            'tile': (tile_size, tile_size),
+            'resolution': (1.0, 1.0),
+            'resolutionunit': 'NONE'
+        }
         
-        # Prepare the unmixed data array
-        unmixed_data = np.zeros((channel_count - 1, size_y, size_x), dtype=np.uint8)
-        
-        # Apply channel arithmetic to subtract AF from each channel
-        unmixed_channel_index = 0
-        unmixed_channel_names = []
-        for i in range(channel_count):
-            if i != af_channel_index:
-                channel_data = reader.openBytes(i)
-                channel_data = np.frombuffer(channel_data, dtype=np.uint8).reshape((size_y, size_x))
-                if unmixing_matrix is not None:
-                    # Apply unmixing matrix if provided
-                    unmixed_data[unmixed_channel_index] = np.dot(unmixing_matrix[unmixed_channel_index], channel_data.flatten()).reshape((size_y, size_x))
-                else:
-                    # Default unmixing by subtracting AF channel
-                    unmixed_data[unmixed_channel_index] = np.maximum(0, channel_data - (af_channel_data * unmix_coeff))
-                unmixed_channel_names.append(meta_retrieve.getChannelName(0, i))
-                unmixed_channel_index += 1
-        
-        # Generate image pyramid
-        pyramid = list(pyramid_gaussian(unmixed_data, downscale=2, channel_axis=0))
-        
-        # Save the unmixed data and pyramid to a new OME-TIFF file using tifffile
-        with tifffile.TiffWriter(output_path, bigtiff=True) as tif:
-            for level, data in enumerate(pyramid):
-                if level == 0:
-                    metadata = {
-                        'axes': 'CYX',
-                        'Channel': {'Name': unmixed_channel_names}
-                    }
-                    tif.write(data, photometric='minisblack', metadata=metadata)
-                else:
-                    tif.write(data, photometric='minisblack')
-        
-        print(f"Unmixed data saved to {output_path}")
-        
-    finally:
-        # Close the reader
-        reader.close()
+        # Write each level
+        for i, level in enumerate(pyramid):
+            if i > 0:
+                options['subfiletype'] = 1  # FILETYPE_REDUCEDIMAGE
+            tif.write(level, **options)
+    
+    logger.info(f"Saved OME-TIFF to {output_path} with enhanced channel metadata")
+
+def main():
+    parser = argparse.ArgumentParser(description='Convert line scan TIFF tiles to pyramidal OME-TIFF')
+    parser.add_argument('--folder', required=True, help='Folder containing TIFF tiles')
+    parser.add_argument('--output', required=True, help='Output OME-TIFF file')
+    parser.add_argument('--pattern', help='Pattern to match filenames (e.g. "component_data")')
+    parser.add_argument('--channels', type=int, default=6, help='Number of channels (default: 6)')
+    parser.add_argument('--channel-names', nargs='+', 
+                        default=['DAPI', 'Opal 480', 'Opal 520', 'Opal 570', 'Opal 620', 'Sample AF'],
+                        help='Channel names')
+    parser.add_argument('--compression', default='zlib', choices=['zlib', 'lzma', 'jpeg', 'none'],
+                        help='Compression type (default: zlib)')
+    args = parser.parse_args()
+    
+    # Find files
+    logger.info(f"Searching for TIFF files in {args.folder}")
+    files = find_tiff_files(args.folder, args.pattern)
+    logger.info(f"Found {len(files)} TIFF files")
+    
+    if not files:
+        logger.error("No matching files found.")
+        return
+    
+    # Analyze files to determine overall dimensions
+    logger.info("Analyzing files to determine dimensions...")
+    coordinates, dimensions, max_x, max_y, max_width, max_height = analyze_files(files)
+    logger.info(f"Canvas size will be {max_y}x{max_x} with {args.channels} channels")
+    
+    # Create empty canvas
+    canvas = create_canvas(max_x, max_y, args.channels)
+    
+    # Process each file
+    logger.info("Placing images on canvas...")
+    for i, file in enumerate(files):
+        x, y = extract_coordinates(file.name)
+        if x is None or y is None:
+            continue
+            
+        logger.info(f"Processing file {i+1}/{len(files)}: {file.name}")
+        img = read_tiff(file)
+        canvas = place_image_on_canvas(canvas, img, x, y)
+    
+    # Write the final OME-TIFF
+    logger.info(f"Writing OME-TIFF to {args.output}...")
+    write_ome_tiff(args.output, canvas, args.channel_names, compression=args.compression)
+    logger.info("Done!")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Unmix channels in a QPTIFF file and save to OME-TIFF with image pyramid.")
-    parser.add_argument("input", help="Path to the input QPTIFF file")
-    parser.add_argument("output", help="Path to the output OME-TIFF file")
-    parser.add_argument("--unmixing_matrix", help="Path to the unmixing matrix .npy file", default=None)
-    args = parser.parse_args()
-
-    # Load unmixing matrix if provided
-    unmixing_matrix = None
-    if args.unmixing_matrix:
-        unmixing_matrix = np.load(args.unmixing_matrix)
-
-    # Perform unmixing and save to OME-TIFF
-    unmix_channels(args.input, args.output, unmixing_matrix=unmixing_matrix)
-
+    main()
